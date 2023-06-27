@@ -1,0 +1,11 @@
+.terraform/
+.terraform.lock.hcl
+exercise3/dovekey
+exercise3/dovekey.pub
+terraform.tfstate
+terraform.tfstate.backup
+
+env.auto.tfvars
+tf-key
+tf-key.pub
+plan.txt
