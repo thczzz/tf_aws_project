@@ -11,144 +11,158 @@ pipeline {
     
     stages {
 
-        // stage('print env vars') {
-        //   steps {
-        //     echo sh(script: 'env|sort', returnStdout: true)
-        //   }
-        // }
-        
-        stage('SET trigger cause') {
+        stage('mkdir') {
             steps {
-                script {
-                    env.TRIGGER_CAUSE = sh (returnStdout: true, script: """#!/bin/bash
-                        if [[ ${env.GITHUB_BRANCH_SHORT_DESC} == *"Hash Changed"* ]]; then
-                            echo "hash_changed"
-                        else
-                            echo "branch_created"
-                        fi
-                    """)
-                }
+                sh "mkdir -p ${env.JOB_NAME}_${env.BUILD_ID}/vprofile-project/"
             }
         }
+        
+        // stage('SET trigger cause') {
+        //     steps {
+        //         script {
+        //             env.TRIGGER_CAUSE = sh (returnStdout: true, script: """#!/bin/bash
+        //                 echo ${env.GITHUB_BRANCH_SHORT_DESC}
+        //                 if [[ "${env.GITHUB_BRANCH_SHORT_DESC}" == *"Hash Changed"* ]]; then
+        //                     echo "hash_changed"
+        //                 else
+        //                     echo "branch_created"
+        //                 fi
+        //             """)
+        //         }
+        //     }
+        // }
 
         stage('Fetch Terraform code') {
             steps {
-              git branch: 'master', url: 'https://github.com/thczzz/tf_aws_project.git'
+                dir("${env.JOB_NAME}_${env.BUILD_ID}") {
+                    git branch: 'master', url: 'https://github.com/thczzz/tf_aws_project.git'
+                }
             }
         }
 
         stage('Create ssh-keys') {
             steps {
-                sh """!#/bin/bash
-                    cd new_env && ssh-keygen -f tf-key -P ""
-                """
+                dir("${env.JOB_NAME}_${env.BUILD_ID}") {
+                    sh 'cd new_env && ssh-keygen -f tf-key -P ""'
+                }
             }
         }
 
         stage('S3download') {
             steps {
-                withAWS(credentials:'ebsDeployment') {
-                    s3Download(file: 'terraform/${env.GITHUB_BRANCH_NAME}_env/secrets/application.properties', 
-                               bucket: 'vprofile-kops-state-343', 
-                               path: '/home/ubuntu/application.properties')
-                }
-
-                withAWS(credentials:'ebsDeployment') {
-                    s3Download(file: 'secrets/env.auto.tfvars', 
-                               bucket: 'vprofile-kops-state-343', 
-                               path: 'new_env/env.auto.tfvars')
+                dir("${env.JOB_NAME}_${env.BUILD_ID}") {
+                    withAWS(region: "us-east-1", credentials:'ebsDeployment') {
+                        s3Download(file: 'new_env/env.auto.tfvars', 
+                                   bucket: 'vprofile-kops-state-343', 
+                                   path: 'secrets/env.auto.tfvars')
+                    }
                 }
             }
         }
 
         stage('init new ENV') {
             steps {
-                withAWS(credentials:'ebsDeployment') {
-                    sh """!#/bin/bash
-                        export TF_VAR_GITHUB_BRANCH_NAME=${env.GITHUB_BRANCH_NAME}
-                        cd new_env && echo "yes" | terraform init -backend-config="key=terraform/${env.GITHUB_BRANCH_NAME}_env/terraform.tfstate"
-                    """
+                dir("${env.JOB_NAME}_${env.BUILD_ID}") {
+                    withAWS(region: "us-east-1", credentials:'ebsDeployment') {
+                        sh "cd new_env && echo 'yes' | terraform init -backend-config='key=terraform/${env.GITHUB_BRANCH_NAME}_env/terraform.tfstate'"
+                    }
                 }
             }
         }
 
         stage('Apply ENV') {
             steps {
-                withAWS(credentials:'ebsDeployment') {
-                    sh """!#/bin/bash
-                        cd new_env && terraform validate && terraform apply -var="exclude_beanstalk_env=true" --auto-approve
-                    """
+                dir("${env.JOB_NAME}_${env.BUILD_ID}") {
+                    withAWS(region: "us-east-1", credentials:'ebsDeployment') {
+                        sh "cd new_env && terraform validate && terraform apply -var='GITHUB_BRANCH_NAME=${env.GITHUB_BRANCH_NAME}' -var='exclude_beanstalk_env=false' --auto-approve"
+                    }
+                }
+            }
+        }
+
+        stage('S3download 2') {
+            steps {
+                withAWS(region: "us-east-1", credentials:'ebsDeployment') {
+                    s3Download(file: '/home/ubuntu/application.properties', 
+                               bucket: 'vprofile-kops-state-343', 
+                               path: "terraform/${env.GITHUB_BRANCH_NAME}_env/secrets/application.properties")
                 }
             }
         }
 
         stage('Fetch code') {
             steps {
-              git branch: 'vp-rem', url: 'https://github.com/thczzz/vprofile-project.git'
+                dir("${env.JOB_NAME}_${env.BUILD_ID}/vprofile-project") {
+                    git branch: 'vp-rem', url: 'https://github.com/thczzz/vprofile-project.git'
+                }
             }
         }
 
         stage('Update application.properties') {
           steps {
-            sh '''
-              rm -rf src/main/resources/application.properties
-              cp /home/ubuntu/application.properties src/main/resources/
-            '''
+            dir("${env.JOB_NAME}_${env.BUILD_ID}/vprofile-project") {
+                sh """
+                    rm -rf src/main/resources/application.properties
+                    cp /home/ubuntu/application.properties src/main/resources/
+                    export BEANSTALK_ENV_NAME=$(grep -oP "(?<=beanstalk_env_name=).+" src/main/resources/application.properties
+                """
+            }
           }
         }
 
         stage('Build') {
             steps {
-                sh 'mvn install -DskipTests'
-            }
-
-            post {
-                success {
-                    echo 'Now Archiving it...'
-                    archiveArtifacts artifacts: '**/target/*.war'
+                dir("${env.JOB_NAME}_${env.BUILD_ID}/vprofile-project") {
+                    sh 'mvn install -DskipTests'
                 }
             }
         }
 
         stage('UNIT TESTS') {
             steps {
-                sh 'mvn test'
+                dir("${env.JOB_NAME}_${env.BUILD_ID}/vprofile-project") {
+                    sh 'mvn test'
+                }
             }
         }
 
         stage('Checkstyle Analysis') {
             steps {
-                sh 'mvn checkstyle:checkstyle'
+                dir("${env.JOB_NAME}_${env.BUILD_ID}/vprofile-project") {
+                    sh 'mvn checkstyle:checkstyle'
+                }
             }
         }
 
-        // stage('Rename vprofile-v2.war') {
-        //   steps {
-        //     sh 'mv target/vprofile-v2.war target/ROOT.war'
-        //   }
-        // }
+        stage('Rename vprofile-v2.war') {
+          steps {
+            dir("${env.JOB_NAME}_${env.BUILD_ID}/vprofile-project") {
+                sh 'mv target/vprofile-v2.war target/ROOT.war'
+            }
+          }
+        }
 
-        // stage('Deploy to BeanStalk') {
-        //   steps {
-        //     step(
-        //       [
-        //         $class: 'AWSEBDeploymentBuilder', 
-        //         zeroDowntime: false,
-        //         awsRegion: 'us-east-1', 
-        //         applicationName: 'vprofile-prod2', 
-        //         environmentName: 'vprofile-bean-prod', 
-        //         bucketName: 'elasticbeanstalk-us-east-1-930052591067', 
-        //         rootObject: "target",
-        //         includes: "ROOT.war",
-        //         credentialId: "ebsDeployment",
-        //         versionLabelFormat: 'test', 
-        //         versionDescriptionFormat: 'test'
-        //       ]
-        //     )
-        //   } 
-        // }
-
-
+        stage('Deploy to BeanStalk') {
+          steps {
+            dir("${env.JOB_NAME}_${env.BUILD_ID}/vprofile-project") {
+                step(
+                    [
+                        $class: 'AWSEBDeploymentBuilder', 
+                        zeroDowntime: false,
+                        awsRegion: 'us-east-1', 
+                        applicationName: 'vprofile-prod2', 
+                        environmentName: "${env.BEANSTALK_ENV_NAME}", 
+                        bucketName: 'elasticbeanstalk-us-east-1-930052591067', 
+                        rootObject: "target",
+                        includes: "ROOT.war",
+                        credentialId: "ebsDeployment",
+                        versionLabelFormat: 'test', 
+                        versionDescriptionFormat: 'test'
+                    ]
+                )
+            }
+          } 
+        }
     }
     // post {
     //     always {
@@ -159,18 +173,14 @@ pipeline {
     //     }
     // }
 
-    post {
-        always {
-            withAWS(credentials:'ebsDeployment') {
-                sh """!#/bin/bash
-                    cd ${env.WORKDIR}/tf_aws_project/new_env && terraform destroy -var="exclude_beanstalk_env=true" --auto-approve
-                """
-
-                sh """!#/bin/bash
-                    rm -rf ${env.WORKDIR}/*
-                """
-            }
-        }
-    }
+    // post {
+    //     always {
+    //         dir("${env.JOB_NAME}_${env.BUILD_ID}") {
+    //             withAWS(region: "us-east-1", credentials:'ebsDeployment') {
+    //                 sh "cd new_env && terraform destroy -var='GITHUB_BRANCH_NAME=${env.GITHUB_BRANCH_NAME}' -var='exclude_beanstalk_env=false' --auto-approve && cd .. && rm -rf *"
+    //             }
+    //         }
+    //     }
+    // }
 
 }
