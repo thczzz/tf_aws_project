@@ -3,7 +3,7 @@ variable "AWS_REGION" {
 }
 
 variable "MYIP" {
-  default = "82.103.99.58/32"
+  default = ""
 }
 
 variable "instance_count" {
